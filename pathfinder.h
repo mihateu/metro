@@ -1,56 +1,38 @@
-#ifndef PATHFINDER_H
-#define PATHFINDER_H
+#pragma once
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 
-#define STATIONSCOUNT 75
-#define LINESCOUNT 6
+#define STATIONSCOUNT 10000
 
-typedef enum {pf_ok, pf_error, pf_file_error, pf_memory_error, pf_invalid_signature} pfStatus;
+typedef enum {pf_ok, pf_error, pf_file_error, pf_memory_error} pfStatus;
 
 typedef struct {
-	unsigned char to;
-	unsigned char time;
-	unsigned char transfer;
+	int to;
+	int time;
+	int transfer;
 } Edge;
 
 typedef struct {
-	unsigned char id;
-	char name[64];
-	unsigned char line_id;
-	unsigned char neighbors_count;
+	int id;
+	int line_id;
+	int neighbors_count;
 	Edge** neighbors_edges;
 } Station;
 
 typedef struct {
-	unsigned char id;
-	char name[64];
-	char color[8];
-} Line;
-
-typedef struct {
-	char* stations;
-	unsigned short length;
-	unsigned short total_time;
-	unsigned char transfers;
+	int* stations;
+	int length;
+	int total_time;
+	int transfers;
 } Path;
 
-int valid_file_check(char *filename, char* signame);
-int get_stations(char* filename, char* signame);
-int get_edges(char* filename, char* signame);
-int get_lines(char* filename, char* signame);
+int get_stations(char* filename);
+int get_edges(char* filename);
 void free_all();
 
 Path* fshortpath(int start, int end);
 void printPath(Path* path);
 void freePath(Path* path);
-
-int find_station(char* name);
-
-const Station* getStations();
-const Line* getLines();
-
-#endif

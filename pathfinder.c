@@ -1,66 +1,22 @@
-#include <openssl/hmac.h>
-#include <openssl/evp.h>
-#include <openssl/crypto.h>
 #include "pathfinder.h"
 
+#define TRANSFER_PENALTY 0
+
 typedef struct {
-	int* stations;
-	int* dist;
-	int size;
-	int capacity;
+	int* head; // head[b] - первая станция в корзине b (если -1, то корзина пуста)
+	int* next; // next[v] - следующая станция в той же корзине
+	int* prev; // prev[v] - предыдущая станция в той же корзине
+	int* bucket; // bucket[v] - номер корзины станции v (если -1, то не в очереди)
+	int nbuckets; // C + 1, где C - максимальный вес ребра
+	int size; // число станций в очереди
+	int capacity; // число станций
+	int cur; // текущая минимальная дистанция
 } PriorityQueue;
 
 Station* stations = NULL;
-Line* lines = NULL;
+static int max_edge_weight = 1; // C для алгоритма Дайала
 
-int p1[] = { (int)'s' ^ 0xA0, (int)'i' ^ 0xA1, (int)'g' ^ 0xA2 };
-int p2[] = { (int)'!' ^ 0xA2, (int)'!' ^ 0xA1, (int)'!' ^ 0xA0 };
-int p3[] = { (int)'k' ^ 0xA0, (int)'e' ^ 0xA1, (int)'y' ^ 0xA2 };
-
-int valid_file_check(char* filename, char* signame) {
-	FILE* file = fopen(filename, "rb");
-	if (!file)
-		return pf_file_error;
-	FILE* sign = fopen(signame, "rb");
-	if (!sign)
-		return pf_file_error;
-	
-	fseek(file, 0, SEEK_END); // 0 - offset, SEEK_END - origin (от конца файла)
-	long size = ftell(file);
-	rewind(file);
-
-	unsigned char *data = (unsigned char*)malloc(size * sizeof(unsigned char));
-	fread(data, sizeof(char), (size_t)size, file);
-
-	char key[10] = { 0 };
-	for (int i = 0; i < 3; i++) {
-		key[i] = (char)(p1[i] ^ (0xA0 + i));
-		key[i + 3] = (char)(p2[i] ^ (0xA2 - i));
-		key[i + 6] = (char)(p3[i] ^ (0xA0 + i));
-	}
-
-	unsigned char hmac[32]; unsigned int hmac_len = 0;
-	HMAC(EVP_sha256(), key, strlen(key), data, size, hmac, &hmac_len);
-	memset(key, 0, sizeof(key));
-
-	free(data);
-	
-	char buffer[32];
-	fread(buffer, sizeof(char), sizeof(buffer), sign);
-
-	if (CRYPTO_memcmp(buffer, hmac, sizeof(buffer)) != 0) {
-		printf("Нарушена целостность файла %s.\n", filename);
-		return pf_invalid_signature;
-	}
-
-	fclose(file);
-	fclose(sign);
-	return pf_ok;
-}
-
-int get_stations(char* filename, char* signame) {
-	if (valid_file_check(filename, signame) != 0)
-		return pf_invalid_signature;
+int get_stations(char* filename) {
 
 	FILE* file = fopen(filename, "r");
 	if (!file) {
@@ -80,14 +36,12 @@ int get_stations(char* filename, char* signame) {
 	while (fgets(line, (int)sizeof(line), file)) {
 		if (line[0] == '#') continue;
 
-		unsigned char id, line_id;
-		char name[64] = { 0 };
+		int id, line_id;
 
-		sscanf(line, "%hhu;%[^;];%hhu", &id, name, &line_id);
+		sscanf(line, "%d;%d", &id, &line_id);
 
 		stations[i].id = id;
 		stations[i].line_id = line_id;
-		strncpy(stations[i].name, name, sizeof(name));
 		stations[i].neighbors_count = 0;
 		stations[i].neighbors_edges = NULL;
 
@@ -98,9 +52,7 @@ int get_stations(char* filename, char* signame) {
 	return pf_ok;
 }
 
-int get_edges(char* filename, char* signame) {
-	if (valid_file_check(filename, signame) != 0)
-		return pf_invalid_signature;
+int get_edges(char* filename) {
 
 	FILE* file = fopen(filename, "r");
 	if (!file) {
@@ -113,8 +65,8 @@ int get_edges(char* filename, char* signame) {
 	while (fgets(line, (int)sizeof(line), file)) {
 		if (line[0] == '#') continue;
 
-		unsigned char from, to, time, transfer;
-		sscanf(line, "%hhu;%hhu;%hhu;%hhu", &from, &to, &time, &transfer);
+		int from, to, time, transfer;
+		sscanf(line, "%d;%d;%d;%d", &from, &to, &time, &transfer);
 
 		stations[from - 1].neighbors_count++;
 		stations[to - 1].neighbors_count++;
@@ -123,26 +75,41 @@ int get_edges(char* filename, char* signame) {
 	for (int i = 0; i < STATIONSCOUNT; i++) {
 		if (stations[i].neighbors_count > 0) {
 			stations[i].neighbors_edges = (Edge**)calloc(stations[i].neighbors_count, sizeof(Edge*));
-			if (!stations[i].neighbors_edges)
+			if (!stations[i].neighbors_edges) {
+				fclose(file);
 				return pf_error;
+			}
 		}
 	}
 
 	rewind(file);
 
 	int* current_edge = (int*)calloc(STATIONSCOUNT, sizeof(int));
-	if (!current_edge)
+	if (!current_edge) {
+		fclose(file);
 		return pf_memory_error;
+	}
 
 	while (fgets(line, (int)sizeof(line), file)) {
 		if (line[0] == '#') continue;
 
-		unsigned char from, to, time, transfer;
-		sscanf(line, "%hhu;%hhu;%hhu;%hhu", &from, &to, &time, &transfer);
+		int from, to, time, transfer;
+		sscanf(line, "%d;%d;%d;%d", &from, &to, &time, &transfer);
+		if (time < 0) {
+			free(current_edge);
+			fclose(file);
+			return pf_error;
+		}
+
+		int w = time + TRANSFER_PENALTY; // +1 — возможное ожидание поезда при пересадке
+		if (w > max_edge_weight)
+			max_edge_weight = w;
 
 		Edge* edge1 = (Edge*)malloc(sizeof(Edge));
-		if (!edge1)
+		if (!edge1) {
+			fclose(file);
 			return pf_memory_error;
+		}
 		edge1->to = to - 1;
 		edge1->time = time;
 		edge1->transfer = transfer;
@@ -151,8 +118,10 @@ int get_edges(char* filename, char* signame) {
 		current_edge[from - 1]++;
 
 		Edge* edge2 = (Edge*)malloc(sizeof(Edge));
-		if (!edge2)
+		if (!edge2) {
+			fclose(file);
 			return pf_memory_error;
+		}
 		edge2->to = from - 1;
 		edge2->time = time;
 		edge2->transfer = transfer;
@@ -162,46 +131,6 @@ int get_edges(char* filename, char* signame) {
 	}
 
 	free(current_edge);
-	fclose(file);
-
-	return pf_ok;
-}
-
-int get_lines(char* filename, char* signame) {
-	if (valid_file_check(filename, signame) != 0)
-		return pf_invalid_signature;
-		
-	FILE* file = fopen(filename, "r");
-	if (!file) {
-		printf("Unable to open lines file.\n");
-		return pf_file_error;
-	}
-
-	lines = (Line*)calloc(LINESCOUNT, sizeof(Line));
-	if (!lines) {
-		fclose(file);
-		return pf_memory_error;
-	}
-
-	char line[128] = { 0 };
-	
-	int i = 0;
-	while (fgets(line, (int)sizeof(line), file)) {
-		if (line[0] == '#') continue;
-
-		unsigned char id;
-		char name[64] = { 0 };
-		char color[8] = { 0 };
-
-		sscanf(line, "%hhu;%[^;];%[^\r\n]", &id, name, color);
-
-		lines[i].id = id;
-		strncpy(lines[i].name, name, sizeof(name));
-		strncpy(lines[i].color, color, sizeof(color));
-
-		i++;
-	}
-
 	fclose(file);
 
 	return pf_ok;
@@ -221,86 +150,108 @@ void free_all() {
 		free(stations);
 		stations = NULL;
 	}
-	else if (lines) {
-		free(lines);
-		lines = NULL;
-	}
 }
 
-PriorityQueue* make_queue(int capacity) {
-	PriorityQueue* pq = (PriorityQueue*)malloc(sizeof(PriorityQueue));
+static void free_queue(PriorityQueue* pq) {
+	if (!pq) return;
+	free(pq->head);
+	free(pq->next);
+	free(pq->prev);
+	free(pq->bucket);
+	free(pq);
+}
+
+static PriorityQueue* make_queue(int capacity) {
+	PriorityQueue* pq = (PriorityQueue*)calloc(1, sizeof(PriorityQueue));
 	if (!pq) return NULL;
 
-	pq->stations = (int*)malloc(capacity * sizeof(int));
-	if (!pq->stations) return NULL;
+	pq->nbuckets = max_edge_weight + 1;
+	pq->capacity = capacity;
+	pq->head = (int*)malloc(pq->nbuckets * sizeof(int));
+	pq->next = (int*)malloc(capacity * sizeof(int));
+	pq->prev = (int*)malloc(capacity * sizeof(int));
+	pq->bucket = (int*)malloc(capacity * sizeof(int));
+	if (!pq->head || !pq->next || !pq->prev || !pq->bucket) {
+		free_queue(pq);
+		return NULL;
+	}
 
-	pq->dist = (int*)malloc(capacity * sizeof(int));
-	if (!pq->dist) return NULL;
+	for (int b = 0; b < pq->nbuckets; b++) 
+		pq->head[b] = -1;
+	for (int v = 0; v < capacity; v++)
+		pq->bucket[v] = -1;
 
 	pq->size = 0;
-	pq->capacity = capacity;
+	pq->cur = 0;
 	return pq;
 }
 
-void push_queue(PriorityQueue* pq, int station, int dist) {
-	pq->stations[pq->size] = station;
-	pq->dist[pq->size] = dist;
-	pq->size++;
+static void unlink_station(PriorityQueue* pq, int v) {
+	int b = pq->bucket[v];
 
-	for (int i = pq->size - 1; i > 0; i--) {
-		if (pq->dist[i] < pq->dist[i - 1]) {
-			int temp_station = pq->stations[i];
-			int temp_dist = pq->dist[i];
-			
-			pq->stations[i] = pq->stations[i - 1];
-			pq->dist[i] = pq->dist[i - 1];
-			pq->stations[i - 1] = temp_station;
-			pq->dist[i - 1] = temp_dist;
-		} 
-		else
-			break;
-	}
+	if (pq->prev[v] != -1) 
+		pq->next[pq->prev[v]] = pq->next[v];
+	else
+		pq->head[b] = pq->next[v];
+
+	if (pq->next[v] != -1) 
+		pq->prev[pq->next[v]] = pq->prev[v];
+
+	pq->bucket[v] = -1;
+	pq->size--;
+}
+
+static void push_queue(PriorityQueue* pq, int station, int dist) {
+	if (pq->bucket[station] != -1) // вынимаем из старой корзины
+		unlink_station(pq, station);
+
+	if (pq->size == 0) // очередь пуста
+		pq->cur = dist;
+
+	int b = dist % pq->nbuckets;
+	pq->prev[station] = -1;
+	pq->next[station] = pq->head[b];
+	if (pq->head[b] != -1)
+		pq->prev[pq->head[b]] = station;
+	pq->head[b] = station;
+	pq->bucket[station] = b;
+	pq->size++;
 }
 
 int pop_queue(PriorityQueue* pq) {
-	if (pq->size == 0) return -1;
+	if (pq->size == 0)
+		return -1;
 
-	int result = pq->stations[0];
+	// все дистанции в очереди лежат в [cur, cur + C], поэтому цикл конечен
+	while (pq->head[pq->cur % pq->nbuckets] == -1)
+		pq->cur++;
 
-	for (int i = 0; i < pq->size - 1; i++) {
-		pq->stations[i] = pq->stations[i + 1];
-		pq->dist[i] = pq->dist[i + 1];
-	}
-	pq->size--;
-
-	return result;
-}
-
-void free_queue(PriorityQueue* pq) {
-	free(pq->stations);
-	free(pq->dist);
-	free(pq);
+	int v = pq->head[pq->cur % pq->nbuckets];
+	unlink_station(pq, v);
+	return v;
 }
 
 Path* fshortpath(int start, int end) {
 	if (start < 0 || start >= STATIONSCOUNT || end < 0 || end >= STATIONSCOUNT)
 		return NULL;
 
-	unsigned short* dist = (unsigned short*)calloc(STATIONSCOUNT, sizeof(unsigned short));
+	// dist и transfers одним блоком: free(dist) освобождает оба, очистку менять не нужно
+	int* dist = (int*)calloc(2 * STATIONSCOUNT, sizeof(int));
 	if (!dist)
 		return NULL;
-	short* previous = (short*)calloc(STATIONSCOUNT, sizeof(short));
+	int* transfers = dist + STATIONSCOUNT;
+	int* previous = (int*)calloc(STATIONSCOUNT, sizeof(int));
 	if (!previous) {
 		free(dist);
 		return NULL;
 	}
-	unsigned char* visited = (unsigned char*)calloc(STATIONSCOUNT, sizeof(unsigned char));
+	int* visited = (int*)calloc(STATIONSCOUNT, sizeof(int));
 	if (!visited) {
 		free(dist);
 		free(previous);
 		return NULL;
 	}
-	unsigned char* previous_transfer = (unsigned char*)calloc(STATIONSCOUNT, sizeof(unsigned char));
+	int* previous_transfer = (int*)calloc(STATIONSCOUNT, sizeof(int));
 	if (!previous_transfer) {
 		free(dist);
 		free(previous);
@@ -309,12 +260,14 @@ Path* fshortpath(int start, int end) {
 	}
 
 	for (int i = 0; i < STATIONSCOUNT; i++) {
-		dist[i] = USHRT_MAX;
+		dist[i] = INT_MAX;
 		previous[i] = -1;
 		previous_transfer[i] = 0;
+		transfers[i] = INT_MAX;
 	}
 
-	dist[start] = 1; // закладываем предварительное ожидание поезда
+	dist[start] = 0;
+	transfers[start] = 0;
 
 	PriorityQueue* pq = make_queue(STATIONSCOUNT);
 	if (!pq) {
@@ -331,23 +284,30 @@ Path* fshortpath(int start, int end) {
 		if (current < 0 || current >= STATIONSCOUNT)
 			break;
 
-		if (visited[current]) continue;
+		if (visited[current]) 
+			continue;
 		visited[current] = 1;
 
-		if (current == end) break;
+		if (current == end) 
+			break;
 
-		for (unsigned char i = 0; i < stations[current].neighbors_count; i++) {
+		for (int i = 0; i < stations[current].neighbors_count; i++) {
 			Edge* edge = stations[current].neighbors_edges[i];
-			unsigned char neighbor = edge->to;
+			int neighbor = edge->to;
 
-			if (visited[neighbor]) continue;
+			if (visited[neighbor]) 
+				continue;
 
-			unsigned short new_dist = dist[current] + edge->time;
-			if (stations[current].line_id != stations[neighbor].line_id)
-				new_dist += 1; // если пересадка, то докидываем время ожидания поезда
+			int new_dist = dist[current] + edge->time;
+			int new_transfers = transfers[current];
+			if (stations[current].line_id != stations[neighbor].line_id) {
+				new_dist += TRANSFER_PENALTY; // если пересадка, то докидываем время ожидания поезда
+				new_transfers++;
+			}
 
-			if (new_dist < dist[neighbor]) {
+			if (new_dist < dist[neighbor] || (new_dist == dist[neighbor] && new_transfers < transfers[neighbor])) {
 				dist[neighbor] = new_dist;
+				transfers[neighbor] = new_transfers;
 				previous[neighbor] = current;
 				previous_transfer[neighbor] = edge->transfer;
 				push_queue(pq, neighbor, new_dist);
@@ -355,12 +315,12 @@ Path* fshortpath(int start, int end) {
 		}
 	}
 
-	if (dist[end] == USHRT_MAX) {
+	if (dist[end] == INT_MAX) {
 		free(dist); free(previous); free(visited); free(previous_transfer); free_queue(pq);
 		return NULL;
 	}
 
-	unsigned short pathlen = 0;
+	int pathlen = 0;
 	int current = end;
 	while (current != -1) {
 		pathlen++;
@@ -372,7 +332,7 @@ Path* fshortpath(int start, int end) {
 		free(dist); free(previous); free(visited); free(previous_transfer); free_queue(pq);
 		return NULL;
 	}
-	path->stations = (char*)malloc(pathlen * sizeof(char));
+	path->stations = (int*)malloc(pathlen * sizeof(int));
 	if (!path->stations) {
 		free(path);
 		free(dist); free(previous); free(visited); free(previous_transfer); free_queue(pq);
@@ -383,60 +343,40 @@ Path* fshortpath(int start, int end) {
 	path->transfers = 0;
 
 	current = end;
-	for (short i = pathlen - 1; i >= 0; i--) {
+	for (int i = pathlen - 1; i >= 0; i--) {
 		path->stations[i] = current;
 		current = previous[current];
 	}
 
-	char current_line = stations[(int)path->stations[0]].line_id;
-	for (unsigned short i = 1; i < pathlen; i++) {
-		unsigned char station_line = stations[(int)path->stations[i]].line_id;
-		if (station_line != current_line) {
-			path->transfers++;
-			current_line = station_line;
-		}
-	}
+	path->transfers = transfers[end];
 
 	free(dist); free(previous); free(visited); free(previous_transfer); free_queue(pq);
 	return path;
 }
 
-int find_station(char* name) {
-	for (int i = 0; i < STATIONSCOUNT; i++) {
-		if (strcmp(stations[i].name, name) == 0)
-			return i;
-	}
-	return -1;
-}
-
 void printPath(Path* path) {
 	if (!path || path->length == 0) {
-		printf("Path has not been found.\n");
+		printf("Маршрут не был найден.\n");
 		return;
 	}
 	
-	unsigned char current_line = stations[(int)path->stations[0]].line_id;
-	printf("%s", stations[(int)path->stations[0]].name);
+	int current_line = stations[(int)path->stations[0]].line_id;
+	printf("%d", stations[(int)path->stations[0]].id);
 
 	for (int i = 1; i < path->length; i++) {
-		unsigned char next_line = stations[(int)path->stations[i]].line_id;
+		int next_line = stations[(int)path->stations[i]].line_id;
 
 		if (next_line != current_line) {
-			for (int line_count = 0; line_count < LINESCOUNT; line_count++) {
-				if (next_line == lines[line_count].id) {
-					printf("\n -- пересадка на линию %hhu (%s, %s)\n", lines[line_count].id, lines[line_count].name,lines[line_count].color);
-					break;
-				}
-			}
-			printf("%s", stations[(int)path->stations[i]].name);
+			printf("\n -- пересадка на линию %d\n", next_line);
+			printf("%d", stations[(int)path->stations[i]].id);
 			current_line = next_line;
 		}
 		else
-			printf(" to %s", stations[(int)path->stations[i]].name);
+			printf(" -> %d", stations[(int)path->stations[i]].id);
 	}
 
-	printf("\nОбщее время: %hu минут\n", path->total_time);
-	printf("Пересадок: %hhu\n", path->transfers);
+	printf("\nОбщее время: %d минут\n", path->total_time);
+	printf("Пересадок: %d\n", path->transfers);
 }
 
 void freePath(Path* path) {
@@ -444,12 +384,4 @@ void freePath(Path* path) {
 		free(path->stations);
 		free(path);
 	}
-}
-
-const Station* getStations() {
-	return stations;
-}
-
-const Line* getLines() {
-	return lines;
 }

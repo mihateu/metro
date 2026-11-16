@@ -13,79 +13,69 @@
 	}
 #endif
 
+#include <time.h>
+
 #include "pathfinder.h"
 
 #define STATIONS_DAT "data/stations.dat"
-#define STATIONS_DAT_SIG "data/stations.dat.sig"
 #define EDGES_DAT "data/edges.dat"
-#define EDGES_DAT_SIG "data/edges.dat.sig"
-#define LINES_DAT "data/lines.dat"
-#define LINES_DAT_SIG "data/lines.dat.sig"
+
+int input_station_number(const char* prompt) {
+	int number;
+
+	printf("%s", prompt);
+	if (scanf("%d", &number) != 1 || number < 1 || number > 10000) {
+		printf("Введена некорректная станция.\n");
+		return -1;
+	}
+	
+	return number;
+}
 
 int main() {
 	set_locale();
 
-	if (get_stations(STATIONS_DAT, STATIONS_DAT_SIG) != pf_ok) {
+	if (get_stations(STATIONS_DAT) != pf_ok) {
 		printf("Error occured while stations info loading.\n");
 		return 1;
 	}
 
-	if (get_edges(EDGES_DAT, EDGES_DAT_SIG) != pf_ok) {
+	if (get_edges(EDGES_DAT) != pf_ok) {
 		printf("Error occured while edges info loading.\n");
 		return 1;
 	}
-
-	if (get_lines(LINES_DAT, LINES_DAT_SIG) != pf_ok) {
-		printf("Error occured while lines info loading.\n");
-		return 1;
-	}
 	
-	char startname[64] = { 0 }, endname[64] = {0};
 	int start, end;
-	
-	while (1) {
-		printf("Введите название начальной станции: ");
+	struct timespec t0, t1;
 
-		fgets(startname, (int)sizeof(startname), stdin);
-		char* _endl_pos = strchr(startname, '\n');
-		if (_endl_pos)
-			*_endl_pos = '\0';
-		else {
-			printf("Введено некорректное название станции.\n");
-			char c;
-			while ((c = getchar()) != '\n' && c != EOF); // дочитываем мусор из входного потока
-			continue;
-		}
+	do {
 
-		printf("Введение название конечной станциии: ");
+		start = input_station_number("Введите номер начальной станции: ");
+		end = input_station_number("Введите номер конечной станцит: ");
 
-		fgets(endname, (int)sizeof(endname), stdin);
-		_endl_pos = strchr(endname, '\n');
-		if (_endl_pos)
-			*_endl_pos = '\0';
-		else {
-			printf("Введено некорректное название станции.\n");
-			char c;
-			while ((c = getchar()) != '\n' && c != EOF);
-			continue;
-		}
+		if (start == -1 || end == -1)
+			goto barrier;
 
-		start = find_station(startname);
-		end = find_station(endname);
+		clock_gettime(CLOCK_MONOTONIC, &t0);
 
-		if (start == -1 || end == -1) {
-			printf("Одна из найденных станций не найдена.\n");
-			continue;
-		}
+		Path* path = fshortpath(start - 1, end - 1);
 
-		Path* path = fshortpath(start, end);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+
+		double time = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
+		
 		if (path) {
 			printPath(path);
 			freePath(path);
 		}
 		else
 			printf("Маршрут не найден.\n");
-	}
+
+		printf("Время поиска маршрута: %.1f мкс\n", time);
+barrier:
+		printf("\n#######################################################\n\n");
+
+	} while (1);
 
 	free_all();
 	printf("Программа завершена корректно.\n");
