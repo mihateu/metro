@@ -52,6 +52,11 @@ int rand(void)
 int main() {
 	set_locale();
 
+	int count = 10000;
+
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0); // начинаем замеры
+
 	if (get_stations(STATIONS_DAT) != pf_ok) {
 		printf("Error occured while stations info loading.\n");
 		return 1;
@@ -62,11 +67,6 @@ int main() {
 		return 1;
 	}
 	
-	double total_time = 0.0;
-	double min_time = 0.0;
-	double max_time = 0.0;
-	int count = 10000;
-
 	for (int i = 0; i < count; i++) {
 		int start = rand() % STATIONS_COUNT;
 		int end = rand() % STATIONS_COUNT;
@@ -74,31 +74,12 @@ int main() {
 		while (start == end)
 			end = rand() % STATIONS_COUNT;
 
-		struct timespec t0, t1;
-
-		clock_gettime(CLOCK_MONOTONIC, &t0);
 		Path* path = find_path(start, end);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-
-		double elapsed_time = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
-
-		total_time += elapsed_time;
-
-		if (i == 0 || elapsed_time < min_time)
-			min_time = elapsed_time;
-
-		if (i == 0 || elapsed_time > max_time)
-			max_time = elapsed_time;
 
 		if (path)
 			free_path(path);
 	}
-
-	printf("Количество поисков: %d\n", count);
-	printf("Общее время: %.2f мкс\n", total_time);
-	printf("Среднее время поиска: %.2f мкс\n", total_time / count);
 	
-
 	/*
 	do {
 
@@ -131,6 +112,13 @@ barrier:
 	*/
 
 	free_all();
+
+	clock_gettime(CLOCK_MONOTONIC, &t1); // заканчиваем замеры
+	double elapsed_time = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
+
+	printf("Количество поисков: %d\n", count);
+	printf("Общее время: %.2f мкс\n", elapsed_time);
+
 	printf("Программа завершена корректно.\n");
 
 	return 0;

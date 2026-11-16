@@ -19,7 +19,7 @@ typedef struct {
 	int id; // номер станции
 	int line_id; // номер линии, к которой станция принадлежит
 	int neighbors_count; // количество соседей у станции
-	Edge** edges; // массив указателей на ребра, ведущие к соседям
+	Edge* edges; // массив ребер, ведущих к соседям
 } Station;
 
 typedef struct {

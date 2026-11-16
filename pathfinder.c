@@ -15,10 +15,19 @@ typedef struct {
 	int size; // число станций в очереди
 	int capacity; // число станций
 	int cur; // текущая минимальная дистанция
+	int cur_b; // указатель на корзину с минимальной дистанцией
 } PriorityQueue;
 
+static Edge* edges = NULL; // единый блок памяти под ребра графа
 static Station* stations = NULL;
 static int max_edge_weight = 1; // C для алгоритма Дайала
+
+typedef struct {
+	int from;
+	int to;
+	int time;
+	int transfer;
+} RawEdge;
 
 // прочитать файл data/stations.dat и занести id, line_id, 
 // а также проинициализировать neighbors_count, edges в массиве stations
@@ -63,102 +72,120 @@ int get_edges(char* filename) {
 
 	FILE* file = fopen(filename, "r");
 	if (!file) {
-		printf("Unable to open edges file.\n");
+		printf("Unable to open stations file.\n");
 		return pf_file_error;
 	}
 
-	char line[128] = { 0 };
+	int status = pf_ok;
 
+	RawEdge* raw = NULL; // динамический массив сырых ребер из файла
+	size_t raw_count = 0; // количество элементов в нем
+	size_t raw_capacity = 0; // его размер
+
+	int* offset = NULL; // индексы, по которым в общем блоке начинаются ребра каждой станции
+	int* position = NULL;
+	Edge* pool = NULL; // общий блок всех ребер
+
+	char line[128];
 	while (fgets(line, (int)sizeof(line), file)) {
-		if (line[0] == '#') continue;
+		if (line[0] == '#')
+			continue;
 
 		int from, to, time, transfer;
-		sscanf(line, "%d;%d;%d;%d", &from, &to, &time, &transfer);
+		if (sscanf(line, "%d;%d;%d;%d", &from, &to, &time, &transfer) != 4)
+			continue;
+		
+		if (from < 1 || from > STATIONS_COUNT ||
+			to < 1 || to > STATIONS_COUNT || time < 0) {
+				status = pf_error;
+				goto cleanup;
+		}
+		
+		if (raw_count == raw_capacity) { // динамическое увеличение
+			size_t new_capacity = raw_capacity ? raw_capacity * 2 : 1024;
+			RawEdge* tmp = (RawEdge*)realloc(raw, new_capacity * sizeof(RawEdge));
+			if (!tmp) {
+				status = pf_memory_error;
+				goto cleanup;
+			}
 
-		stations[from - 1].neighbors_count++;
-		stations[to - 1].neighbors_count++;
+			raw = tmp;
+			raw_capacity = new_capacity;
+		}
+
+		// сохранение ребра в массив сырых ребер raw
+		raw[raw_count].from = from - 1;
+		raw[raw_count].to = to - 1;
+		raw[raw_count].time = time;
+		raw[raw_count].transfer = transfer;
+		raw_count++;
 	}
+
+	offset = (int*)calloc(STATIONS_COUNT + 1, sizeof(int)); // для правильного подсчета offset STATIONS_COUNT + 1
+	position = (int*)malloc(STATIONS_COUNT * sizeof(int));
+	if (!offset || !position) {
+		status = pf_memory_error;
+		goto cleanup;
+	}
+
+	// считаем, сколько ребер касается каждой станции, и кладем в offset[станция + 1] (степень вершины)
+	for (size_t i = 0; i < raw_count; i++) {
+		offset[raw[i].from + 1]++;
+		offset[raw[i].to + 1]++;
+	}
+
+	// теперь в offset[i] будет лежать начало ребер станции i, а в offset[i+1] - конец не включительно
+	for (int i = 0; i < STATIONS_COUNT; i++) {
+		offset[i + 1] += offset[i];
+	}
+
+	size_t total = (size_t)offset[STATIONS_COUNT]; // общее число записей
+	if (total > 0) {
+		pool = (Edge*)malloc(total * sizeof(Edge)); // выделение общего блока ребер
+		if (!pool) {
+			status = pf_memory_error;
+			goto cleanup;
+		}
+	}
+
+	memcpy(position, offset, STATIONS_COUNT * sizeof(int)); // в position[station] позиция, куда записывается следующее ребро вершины station
+
+	int max_weight = 1;
+	for (size_t i = 0; i < raw_count; i++) {
+		RawEdge* re = &raw[i]; // берем i-ое ребро
+
+		Edge* e1 = &pool[position[re->from]++]; // заполняем грани вершины from
+		e1->to = re->to;
+		e1->time = re->time;
+		e1->transfer = re->transfer;
+
+		Edge* e2 = &pool[position[re->to]++]; // заполняем грани вершины to
+		e2->to = re->from;
+		e2->time = re->time;
+		e2->transfer = re->transfer;
+
+		int weight = re->time + TRANSFER_PENALTY;
+		if (weight > max_weight)
+			max_weight = weight; // запоминаем для max_edge_weight
+	}
+
+	edges = pool; // переводим в глобальный массив
+	pool = NULL;
+	max_edge_weight = max_weight;
 
 	for (int i = 0; i < STATIONS_COUNT; i++) {
-		if (stations[i].neighbors_count > 0) {
-			stations[i].edges = (Edge**)calloc(stations[i].neighbors_count, sizeof(Edge*));
-			if (!stations[i].edges) {
-				fclose(file);
-				return pf_error;
-			}
-		}
+		stations[i].neighbors_count = offset[i + 1] - offset[i]; // обратным путем вычисляем число соседей для каждой станции
+		stations[i].edges = stations[i].neighbors_count > 0 ? edges + offset[i] : NULL; // в stations[i].edges лежит указатель на список ребер вершины
 	}
 
-	rewind(file);
-
-	int* current_edge = (int*)calloc(STATIONS_COUNT, sizeof(int));
-	if (!current_edge) {
-		fclose(file);
-		return pf_memory_error;
-	}
-
-	while (fgets(line, (int)sizeof(line), file)) {
-		if (line[0] == '#') continue;
-
-		int from, to, time, transfer;
-		sscanf(line, "%d;%d;%d;%d", &from, &to, &time, &transfer);
-		if (time < 0) {
-			free(current_edge);
-			fclose(file);
-			return pf_error;
-		}
-
-		int w = time + TRANSFER_PENALTY; // +1 - возможное ожидание поезда при пересадке
-		if (w > max_edge_weight)
-			max_edge_weight = w;
-
-		Edge* edge1 = (Edge*)malloc(sizeof(Edge));
-		if (!edge1) {
-			fclose(file);
-			return pf_memory_error;
-		}
-		edge1->to = to - 1;
-		edge1->time = time;
-		edge1->transfer = transfer;
-
-		stations[from - 1].edges[current_edge[from - 1]] = edge1;
-		current_edge[from - 1]++;
-
-		Edge* edge2 = (Edge*)malloc(sizeof(Edge));
-		if (!edge2) {
-			fclose(file);
-			return pf_memory_error;
-		}
-		edge2->to = from - 1;
-		edge2->time = time;
-		edge2->transfer = transfer;
-
-		stations[to - 1].edges[current_edge[to - 1]] = edge2;
-		current_edge[to - 1]++;
-	}
-
-	free(current_edge);
+cleanup:
+	free(pool);
+	free(position);
+	free(offset);
+	free(raw);
 	fclose(file);
 
-	return pf_ok;
-}
-
-// очистить выделенную под граф память
-void free_all() {
-	if (!stations) 
-		return;
-
-	if (stations) {
-		for (int i = 0; i < STATIONS_COUNT; i++) {
-			if (stations[i].edges) {
-				for (int j = 0; j < stations[i].neighbors_count; j++)
-					free(stations[i].edges[j]);
-				free(stations[i].edges);
-			}
-		}
-		free(stations);
-		stations = NULL;
-	}
+	return status;
 }
 
 // очистить память, выделенную под конкретную очередь
@@ -195,6 +222,8 @@ static PriorityQueue* make_queue(int capacity) {
 
 	pq->size = 0;
 	pq->cur = 0;
+	pq->cur_b = 0;
+
 	return pq;
 }
 
@@ -218,30 +247,33 @@ static void push_queue(PriorityQueue* pq, int station, int dist) {
 	if (pq->bucket[station] != -1) // если станция уже в какой-то корзине, то вынимаем из старой корзины
 		unlink_station(pq, station);
 
+	int bucket;
 	// очередь пуста или станция ближе текущего минимума: сдвигаем cur назад,
 	// иначе станция окажется "позади" cur и будет извлечена с огромной задержкой
-	if (pq->size == 0 || dist < pq->cur)
+	if (pq->size == 0 || dist < pq->cur) {
 		pq->cur = dist;
+		pq->cur_b = bucket = dist % pq->nbuckets; // случай % при сбросе
+	}
+	else {
+		bucket = pq->cur_b + (dist - pq->cur); // вычисление, в какую корзину положить станцию
+		if (bucket >= pq->nbuckets)
+			bucket -= pq->nbuckets; // обеспечение закольцованности результата
+	}
 
-	int bucket = dist % pq->nbuckets; // вычисляем, в какую корзину положить станцию
+	 // вычисляем, в какую корзину положить станцию
+	int head = pq->head[bucket];
+
 	pq->prev[station] = -1; // добавляем в начало корзины, то есть в голову списка, у головы нет предыдущего элемента
-	pq->next[station] = pq->head[bucket]; // сдвигаем предыдущую голову вперед
-	if (pq->head[bucket] != -1)
-		pq->prev[pq->head[bucket]] = station; // если корзина была не пустая, то для прошлого элемента в начале списка подвязываем индекс вставленной станции в prev
+	pq->next[station] = head; // сдвигаем предыдущую голову вперед
+	if (head != -1)
+		pq->prev[head] = station; // если корзина была не пустая, то для прошлого элемента в начале списка подвязываем индекс вставленной станции в prev
 	pq->head[bucket] = station; // вставка в начало корзины
 	pq->bucket[station] = bucket; // теперь станция лежит в корзине под номером bucket
 	pq->size++; // вставили станцию в очередь - она увеличилась в размере на единицу
 }
 
 int pop_queue(PriorityQueue* pq) {
-	if (pq->size == 0) // если очередь пуста, то и брать нечего
-		return -1;
-
-	// все дистанции в очереди лежат в [cur, cur + C], поэтому цикл конечен
-	while (pq->head[pq->cur % pq->nbuckets] == -1) // проходим циклично по корзинам в поиске первой непустой
-		pq->cur++;
-
-	int station = pq->head[pq->cur % pq->nbuckets]; // забираем первую станцию из найденной корзины
+	int station = pq->head[pq->cur_b]; // забираем первую станцию из найденной корзины
 	unlink_station(pq, station); // поскольку станцию забрали, сделали pop, то ее необходимо удалить из очереди
 	return station; // возвращаем номер взятой станции
 }
@@ -254,31 +286,110 @@ typedef struct {
 	
 	PriorityQueue* queue[2]; // два направления - две очереди (queue[0] - от start, queue[1] - от end)
 	
+	int* touched[2]; // станции, у которых менялась dist в одном запросе
+	int touched_count[2]; // сколько станций в массиве touched для каждой из сторон
+	
 	int best_time; // минимальное время полного маршрута, найденное к текущему моменту
 	int best_transfers; // количество пересадок у лучшего маршрута, сохраненного в best_time
 	int best_forward; // номер станции, на которой заканчивается прямая часть маршрута
 	int best_backward; // номер станции, на которой заканчивается обратная часть маршрута
 } BidirectionState;
 
+static BidirectionState global_state;
+static int state_ready = 0;
+
+// освободит всю память, выделенную под структуру состояния
+static void free_state(BidirectionState* state) {
+	for (int i = 0; i < 2; i++) {
+		free(state->dist[i]); // ибо malloc(4 * STATIONS_COUNT * sizeof(int)); не надо освобождать остальное
+		
+		free_queue(state->queue[i]);
+		
+		state->dist[i] = state->transfers[i] = \
+			state->parent[i] = state->touched[i] = NULL;
+		
+		state->queue[i] = NULL; // не добавлена выше, т.к. у queue тип данных другой
+	}
+	
+	state_ready = 0;
+}
+
+// единожды инициализирует структуру состояния
+static int init_state(BidirectionState* state) {
+	for (int i = 0; i < 2; i++) {
+		int* gen_alloc = (int*)malloc(4 * STATIONS_COUNT * sizeof(int));
+		if (!gen_alloc) {
+			free_state(state);
+			return pf_memory_error;
+		}
+
+		state->dist[i] = gen_alloc;
+		state->transfers[i] = gen_alloc + STATIONS_COUNT;
+		state->parent[i] = gen_alloc + (STATIONS_COUNT << 1);
+		state->touched[i] = gen_alloc + (STATIONS_COUNT << 1) + STATIONS_COUNT;
+		state->queue[i] = make_queue(STATIONS_COUNT);
+
+		for (int j = 0; j < STATIONS_COUNT; j++) {
+			state->dist[i][j] = state->transfers[i][j] = INT_MAX;
+			state->parent[i][j] = -1;
+		}
+
+		state->touched_count[i] = 0;
+	}
+
+	state_ready = 1;
+
+	return pf_ok;
+}
+
+// сброс состояния, лишь затронутые очищаются
+static void reset_state(BidirectionState* state) {
+	for (int i = 0; i < 2; i++) {
+		PriorityQueue* pq = state->queue[i];
+		int k = state->touched_count[i];
+
+		for (int j = 0; j < k; j++) {
+			int station = state->touched[i][j];
+			state->dist[i][station] = state->transfers[i][station] = INT_MAX;
+			state->parent[i][station] = -1;
+
+			if (pq->bucket[station] != -1) { // если станция осталась в очереди
+				pq->head[pq->bucket[station]] = -1; // нам ни к чему вообще эта очередь, всю убираем
+				pq->bucket[station] = -1;
+			}
+		}
+
+		state->touched_count[i] = 0;
+		pq->size = pq->cur = 0;
+	}
+}
+
 // возвращает минимальное расстояние в очереди, не извлекая станцию и не изменяя очередь
 static int peek_queue_distance(PriorityQueue* pq) {
 	if (!pq || pq->size == 0) // нет очереди - нет минимального расстояния
 		return INT_MAX;
 	
+	int bucket = pq->cur_b; // pq->cur_b - указатель на текущую корзину (по pq->cur)
 	int dist = pq->cur; // pq->cur - текущая минимальная дистанция, с которой работает очередь
+	int nb = pq->nbuckets; // чтобы в цикле не вытаскивать кучу раз
 
-	while (pq->head[dist % pq->nbuckets] == -1) { // ищем первую непустую корзину; на ней dist и покажет минимальное расстояние в очереди
+	while (pq->head[bucket] == -1) { // ищем первую непустую корзину; на ней dist и покажет минимальное расстояние в очереди
 		if (dist == INT_MAX) // на случай переполнения dist
 			return INT_MAX;
 		dist++;
+		if (++bucket == nb) // обеспечение закольцованности bucket
+			bucket = 0;
 	}
+
+	pq->cur = dist; // найденное минимальное расстояние (для pop_queue)
+	pq->cur_b = bucket; // корзина с минимумом
 
 	return dist;
 }
 
 // обновляет лучший найденный маршрут
 // best_forward и best_backward - концы места соединения
-static void update_best(BidirectionState* state,	int candidate_time,	int candidate_transfers, int forward, int backward) {
+static void update_best(BidirectionState* state, int candidate_time, int candidate_transfers, int forward, int backward) {
 	if (candidate_time < 0 || candidate_time >= INT_MAX) // проверяем правильность времени в пути
 		return;
 	
@@ -327,8 +438,10 @@ static void search(BidirectionState* state) {
 			update_best(state, candidate_time, candidate_transfers, current, current); // на случай, если нашли более крутой маршрут, вызываем update_best, которая решит, обновлять ли имеющийся маршрут или нет
 		}
 
+		Edge* edges = stations[current].edges;
+
 		for (int i = 0; i < stations[current].neighbors_count; i++) { // проход по всем известным соседям станции
-			Edge* edge = stations[current].edges[i]; // указатель на конкретное ребро графа
+			Edge* edge = &edges[i]; // указатель на конкретное ребро графа
 			int neighbor = edge->to; // номер станции-соседа для текущей
 
 			int line_changed = (stations[current].line_id != stations[neighbor].line_id) ? 1 : 0; // если между текущей станцией и станцией-соседом необходима пересадка, то поднимаем флаг
@@ -356,6 +469,9 @@ static void search(BidirectionState* state) {
 			// то обновляем для соседа лучшее время до станции, количество пересадок, откуда пришли к соседу, получив такие результаты
 			if (new_dist < state->dist[side][neighbor] ||
 				(new_dist == state->dist[side][neighbor] && new_transfers < state->transfers[side][neighbor])) {
+				if (state->dist[side][neighbor] == INT_MAX) // первое касание станции
+					state->touched[side][state->touched_count[side]++] = neighbor;
+
 				state->dist[side][neighbor] = new_dist;
 				state->transfers[side][neighbor] = new_transfers;
 				state->parent[side][neighbor] = current;
@@ -364,6 +480,90 @@ static void search(BidirectionState* state) {
 			}
 		}
 	}
+}
+
+static Path* build_path(BidirectionState* state, int start, int end) {
+	if (state->best_time == INT_MAX || state->best_forward < 0 || state->best_backward < 0) // проверка корректности входных данных
+		return NULL;
+
+	int forward_len = 0; // счетчик количества станций в этой части
+	int current = state->best_forward; // номер станции, на которой закончилась прямая часть найденного маршрута
+	int found_start = 0; // флаг, показывающий, удалось ли дойти до начальной станции
+
+	while (current != -1 && forward_len < STATIONS_COUNT) { // разворачиваем маршрут и смотрим, дойдем ли до start
+		forward_len++;
+		if (current == start) {
+			found_start = 1;
+			break;
+		}
+
+		current = state->parent[0][current];
+	}
+
+	if (!found_start)
+		return NULL;
+
+	int backward_len = 0; // счетчик количества станций в этой части
+	current = state->best_backward; // номер станции, на которой закончилась обратная часть найденного маршрута
+	int found_end = 0; // флаг, показывающий, удалось ли дойти до конечной станции
+
+	while (current != -1 && backward_len < STATIONS_COUNT) { // разворачиваем маршрут и смотрим, дойдем ли до end
+		backward_len++;
+		if (current == end) {
+			found_end = 1;
+			break;
+		}
+		
+		current = state->parent[1][current];
+	}
+
+	if (!found_end)
+		return NULL;
+
+	int same_meeting = (state->best_forward == state->best_backward) ? 1 : 0; // 1, если проходы встретились на одной станции, 0, если соединились через общее ребро
+	int path_len = forward_len + backward_len - same_meeting; // вычитаем same_meeting, чтобы не посчитать одну станцию дважды (случай A-B и B-C: тут 3 станции, а не 4)
+
+
+	Path* result = (Path*)malloc(sizeof(Path));
+	if (!result)
+		return NULL;
+
+	result->stations = (int*)malloc(path_len * sizeof(int));
+	if(!result->stations) {
+		free(result);
+		return NULL;
+	}
+
+	result->length = path_len; // финальная длина маршрута
+	result->total_time = state->best_time; // финальное время маршрута
+	result->transfers = state->best_transfers; // финальное число пересадок на маршруте
+
+	current = state->best_forward;
+	for (int i = forward_len - 1; i >= 0; i--) { // восстанавливаем прямой маршрут наоборот, чтобы в 0 индексе лежал start
+		result->stations[i] = current;
+		current = state->parent[0][current];
+	}
+
+	int position = forward_len;
+	current = state->best_backward;
+	if (same_meeting) // если встреча на одной станции, то она ранее была уже записана в маршрут; не пишем еще раз
+		current = state->parent[1][current];
+
+	while (current != -1 && position < path_len) { // восстанавливаем обратный маршрут в прямом порядке, чтобы в конце как раз лежал end
+		result->stations[position++] = current;
+		
+		if (current == end)
+			break;
+		
+		current = state->parent[1][current];
+	}
+
+	if (position != path_len || result->stations[0] != start || result->stations[path_len - 1] != end) {
+		free_path(result);
+		return NULL;
+	}
+
+	return result;
 }
 
 // главная функция алгоритма поиска
@@ -390,163 +590,30 @@ Path* find_path(int start, int end) {
 		return path;
 	}
 
-	BidirectionState state = { 0 }; // инициализируем и забиваем нулями структуру BidirectionalState
-    state.best_time = INT_MAX; // INT_MAX, поскольку ищем минимальное время
-    state.best_transfers = INT_MAX; // INT_MAX, поскольку ищем минимальное время
-    state.best_forward = -1; // станции соединения не определены, пускай будет -1
-    state.best_backward = -1; // станции соединения не определены, пускай будет -1
+	BidirectionState* state = &global_state;
+	if (!state_ready && init_state(state) != pf_ok) // если структура состояния не инициализирована, делаем это
+		return NULL;
 
-	Path* result = NULL; // тут будет результат
+	state->best_time = state->best_transfers = INT_MAX;
+	state->best_forward = state->best_backward = -1;
 
-	for (int side = 0; side < 2; side++) { // выделяем память для двух направлений и сразу инициализируем
-		state.dist[side] = (int*)malloc(STATIONS_COUNT * sizeof(int));
-		state.transfers[side] = (int*)malloc(STATIONS_COUNT * sizeof(int));
-		state.parent[side] = (int*)malloc(STATIONS_COUNT * sizeof(int));
+	// готовимся запускать start в очередь
+	state->dist[0][start] = state->transfers[0][start] = 0;
+	state->touched[0][state->touched_count[0]++] = start;
 
-		if (!state.dist[side] || !state.transfers[side] || !state.parent[side])
-			goto cleanup;
-		
-		for (int i = 0; i < STATIONS_COUNT; i++) {
-			state.dist[side][i] = INT_MAX;
-			state.transfers[side][i] = INT_MAX;
-			state.parent[side][i] = -1;
-		}
+	// готовимся запускать end в очередь
+	state->dist[1][end] = state->transfers[1][end] = 0;
+	state->touched[1][state->touched_count[1]++] = end;
 
-		state.queue[side] = make_queue(STATIONS_COUNT);
+	push_queue(state->queue[0], start, 0);
+	push_queue(state->queue[1], end, 0);
 
-		if (!state.queue[side])
-			goto cleanup;
-	}
+	search(state);
 
-	// инициализация начальных станций для обоих направлений
-	state.dist[0][start] = 0;
-    state.transfers[0][start] = 0;
+	Path* result = build_path(state, start, end);
+	reset_state(state);
 
-    state.dist[1][end] = 0;
-    state.transfers[1][end] = 0;
-
-	// помещение начальных станций в соответствующие очереди для начала поиска
-    push_queue(state.queue[0], start, 0);
-    push_queue(state.queue[1], end, 0);
-
-	search(&state); // запускаем двунаправленный поиск в текущем потоке
-
-	if (state.best_time == INT_MAX || state.best_forward < 0 || state.best_backward < 0) // если маршрут не найден, то сразу очищаем выделенную память, find_path вернет NULL
-        goto cleanup;
-
-	// восстановление прямой части маршрута
-	int forward_len = 0; // счетчик количества станций в этой части
-    int current = state.best_forward; // номер станции, на которой закончилась прямая часть найденного маршрута
-    int found_start = 0; // флаг, показывающий, удалось ли дойти до начальной станции
-
-	// в цикле восстанавливаем маршрут, идя через массив parent по пройденным станциям
-	while (current != -1 && forward_len < STATIONS_COUNT) {
-        forward_len++;
-
-        if (current == start) {
-            found_start = 1;
-            break;
-        }
-
-        current = state.parent[0][current];
-    }
-
-	if (!found_start)
-        goto cleanup;
-
-	// восстановление обратной части маршрута
-	int backward_len = 0; // счетчик количества станций в этой части
-    current = state.best_backward; // номер станции, на которой закончилась обратная часть найденного маршрута
-    int found_end = 0; // флаг, показывающий, удалось ли дойти до конечной станции
-
-	// в цикле восстанавливаем маршрут, идя через массив parent по пройденным станциям
-    while (current != -1 && backward_len < STATIONS_COUNT) {
-        backward_len++;
-
-        if (current == end) {
-            found_end = 1;
-            break;
-        }
-
-        current = state.parent[1][current];
-    }
-
-    if (!found_end) {
-        goto cleanup;
-	}
-
-	int same_meeting = (state.best_forward == state.best_backward) ? 1 : 0; // 1, если проходы встретились на одной станции, 0, если соединились через общее ребро 
-
-    int path_len = forward_len + backward_len - same_meeting; // вычитаем same_meeting, чтобы не посчитать одну станцию дважды (случай A-B и B-C: тут 3 станции, а не 4)
-
-    int* forward_path = (int*)malloc(forward_len * sizeof(int)); // выделяем память под временный массив прямой части
-
-    if (!forward_path) {
-        goto cleanup;
-	}
-
-	current = state.best_forward;
-
-    for (int i = 0; i < forward_len; i++) {
-        forward_path[i] = current; // вписываем в массив в обратном порядке пройденные станции
-        current = state.parent[0][current];
-    }
-
-    result = (Path*)malloc(sizeof(Path)); // выделяем память под итоговый маршрут
-
-    if (!result) {
-        free(forward_path);
-        goto cleanup;
-    }
-
-    result->stations = (int*)malloc(path_len * sizeof(int)); // выделяем память под всю цепочку станций
-
-	if (!result->stations) {
-        free(result);
-        result = NULL;
-        free(forward_path);
-        goto cleanup;
-    }
-
-    result->length = path_len; // финальная длина маршрута
-    result->total_time = state.best_time; // финальное время маршрута
-    result->transfers = state.best_transfers; // финальное число пересадок на маршруте
-
-    int pos = 0;
-
-    for (int i = forward_len - 1; i >= 0; i--)
-        result->stations[pos++] = forward_path[i]; // заполнение результата прямой частью (в обратном порядке, поскольку и клали в forward_path в обратном порядке станции)
-
-    free(forward_path); // больше ни к чему временный массив этот нам
-
-	current = state.best_backward;
-
-    if (same_meeting)
-        current = state.parent[1][current]; // если оба прохода встретились на одной станции, то она уже была учтена, двигаем указатель к предыдущей
-
-    while (current != -1 && pos < path_len) {
-        result->stations[pos++] = current; // в обратном порядке как раз и развернем так, чтобы end лежал в конце; удобно
-
-        if (current == end)
-            break;
-
-        current = state.parent[1][current];
-    }
-
-	if (pos != path_len || result->stations[0] != start || result->stations[path_len - 1] != end) { // если возникла проблема с итоговым маршрутом (вдруг будет)
-        free_path(result);
-        result = NULL;
-    }
-
-cleanup: // очищаем все, что выделили, для обоих сторон
-    for (int side = 0; side < 2; side++) {
-        free(state.dist[side]);
-        free(state.transfers[side]);
-        free(state.parent[side]);
-        free_queue(state.queue[side]);
-    }
-
-    return result; // возвращаем найденный маршрут
+	return result;
 }
 
 void print_path(Path* path) {
@@ -580,4 +647,18 @@ void free_path(Path* path) {
 		free(path->stations);
 		free(path);
 	}
+}
+
+// очистить выделенную под граф память
+void free_all() {
+	if (!stations)
+		return;
+
+	free_state(&global_state);
+
+	free(edges);
+	edges = NULL;
+
+	free(stations);
+	stations = NULL;
 }
