@@ -6,6 +6,33 @@
 
 #define TRANSFER_PENALTY 0
 
+static inline int asm_choose_side(int min_fwd, int min_bwd) {
+#if defined(__x86_64__)
+    int side = 1;
+    int zero = 0;
+    __asm__(
+        "cmp %2, %1\n\t"
+        "cmovle %3, %0"
+        : "+r"(side)
+        : "r"(min_fwd), "r"(min_bwd), "r"(zero)
+        : "cc"
+    );
+    return side;
+#elif defined(__aarch64__)
+    int side;
+    __asm__(
+        "cmp %w1, %w2\n\t"
+        "csel %w0, wzr, %w3, le"
+        : "=r"(side)
+        : "r"(min_fwd), "r"(min_bwd), "r"(1)
+        : "cc"
+    );
+    return side;
+#else
+    return (min_fwd <= min_bwd) ? 0 : 1;
+#endif
+}
+
 typedef struct {
 	int* head; // head[b] - первая станция в корзине b (если -1, то корзина пуста)
 	int* next; // next[v] - следующая станция в той же корзине
@@ -423,7 +450,9 @@ static void search(BidirectionState* state) {
 				break;
 		}
 
-		int side = (min_forward <= min_backward) ? 0 : 1; // 0 - расширяем прямой поиск, 1 - обратный (пустая очередь имеет INT_MAX и не выбирается)
+        int side = asm_choose_side(min_forward, min_backward);
+        
+		// int side = (min_forward <= min_backward) ? 0 : 1; // 0 - расширяем прямой поиск, 1 - обратный (пустая очередь имеет INT_MAX и не выбирается)
 		int other = 1 - side; // вычисляем противоположное направление (1 - 0 = 1, 1 - 1 = 0)
 
 		int current = pop_queue(state->queue[side]); // достаем станцию из очереди выбранной стороны
