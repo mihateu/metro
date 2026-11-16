@@ -24,7 +24,16 @@ int input_station_number(const char* prompt) {
 	int number;
 
 	printf("%s", prompt);
-	if (scanf("%d", &number) != 1 || number < 1 || number > 10000) {
+	int result = scanf("%d", &number);
+	
+	if (result != 1) {
+		int c;
+		while ((c = getchar()) != '\n' && c != EOF); // нечисловой ввод; чистим остаток строки
+		printf("Введена некорректная станция.\n");
+		return -1;
+	}
+	
+	if (number < 1 || number > STATIONSCOUNT) {
 		printf("Введена некорректная станция.\n");
 		return -1;
 	}
@@ -32,8 +41,21 @@ int input_station_number(const char* prompt) {
 	return number;
 }
 
+static unsigned long int next = 89890;
+
+int rand(void)
+{
+  next = next * 1103515245 + 12345;
+  return (unsigned int)(next/65536) % 32768;
+}
+
 int main() {
 	set_locale();
+
+	int count = 10000;
+
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0); // начинаем замеры
 
 	if (get_stations(STATIONS_DAT) != pf_ok) {
 		printf("Error occured while stations info loading.\n");
@@ -45,39 +67,27 @@ int main() {
 		return 1;
 	}
 	
-	int start, end;
-	struct timespec t0, t1;
+	for (int i = 0; i < count; i++) {
+		int start = rand() % STATIONSCOUNT;
+		int end = rand() % STATIONSCOUNT;
 
-	do {
+		while (start == end)
+			end = rand() % STATIONSCOUNT;
 
-		start = input_station_number("Введите номер начальной станции: ");
-		end = input_station_number("Введите номер конечной станцит: ");
+		Path* path = fshortpath(start, end);
 
-		if (start == -1 || end == -1)
-			goto barrier;
-
-		clock_gettime(CLOCK_MONOTONIC, &t0);
-
-		Path* path = fshortpath(start - 1, end - 1);
-
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-
-		double time = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
-		
-		if (path) {
-			printPath(path);
+		if (path)
 			freePath(path);
-		}
-		else
-			printf("Маршрут не найден.\n");
-
-		printf("Время поиска маршрута: %.1f мкс\n", time);
-barrier:
-		printf("\n#######################################################\n\n");
-
-	} while (1);
+	}
 
 	free_all();
+
+	clock_gettime(CLOCK_MONOTONIC, &t1); // заканчиваем замеры
+	double elapsed_time = (t1.tv_sec - t0.tv_sec) * 1e6 + (t1.tv_nsec - t0.tv_nsec) / 1e3;
+
+	printf("Количество поисков: %d\n", count);
+	printf("Общее время: %.2f мкс\n", elapsed_time);
+
 	printf("Программа завершена корректно.\n");
 
 	return 0;

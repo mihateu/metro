@@ -3,14 +3,10 @@
 #define TRANSFER_PENALTY 0
 
 typedef struct {
-	int* head; // head[b] - первая станция в корзине b (если -1, то корзина пуста)
-	int* next; // next[v] - следующая станция в той же корзине
-	int* prev; // prev[v] - предыдущая станция в той же корзине
-	int* bucket; // bucket[v] - номер корзины станции v (если -1, то не в очереди)
-	int nbuckets; // C + 1, где C - максимальный вес ребра
-	int size; // число станций в очереди
-	int capacity; // число станций
-	int cur; // текущая минимальная дистанция
+	int* stations;
+	int* dist;
+	int size;
+	int capacity;
 } PriorityQueue;
 
 Station* stations = NULL;
@@ -153,82 +149,58 @@ void free_all() {
 }
 
 static void free_queue(PriorityQueue* pq) {
-	if (!pq) return;
-	free(pq->head);
-	free(pq->next);
-	free(pq->prev);
-	free(pq->bucket);
+	free(pq->stations);
+	free(pq->dist);
 	free(pq);
 }
 
 static PriorityQueue* make_queue(int capacity) {
-	PriorityQueue* pq = (PriorityQueue*)calloc(1, sizeof(PriorityQueue));
+	PriorityQueue* pq = (PriorityQueue*)malloc(sizeof(PriorityQueue));
 	if (!pq) return NULL;
 
-	pq->nbuckets = max_edge_weight + 1;
-	pq->capacity = capacity;
-	pq->head = (int*)malloc(pq->nbuckets * sizeof(int));
-	pq->next = (int*)malloc(capacity * sizeof(int));
-	pq->prev = (int*)malloc(capacity * sizeof(int));
-	pq->bucket = (int*)malloc(capacity * sizeof(int));
-	if (!pq->head || !pq->next || !pq->prev || !pq->bucket) {
-		free_queue(pq);
-		return NULL;
-	}
+	pq->stations = (int*)malloc(capacity * sizeof(int));
+	if (!pq->stations) return NULL;
 
-	for (int b = 0; b < pq->nbuckets; b++) 
-		pq->head[b] = -1;
-	for (int v = 0; v < capacity; v++)
-		pq->bucket[v] = -1;
+	pq->dist = (int*)malloc(capacity * sizeof(int));
+	if (!pq->dist) return NULL;
 
 	pq->size = 0;
-	pq->cur = 0;
+	pq->capacity = capacity;
 	return pq;
 }
 
-static void unlink_station(PriorityQueue* pq, int v) {
-	int b = pq->bucket[v];
-
-	if (pq->prev[v] != -1) 
-		pq->next[pq->prev[v]] = pq->next[v];
-	else
-		pq->head[b] = pq->next[v];
-
-	if (pq->next[v] != -1) 
-		pq->prev[pq->next[v]] = pq->prev[v];
-
-	pq->bucket[v] = -1;
-	pq->size--;
-}
-
 static void push_queue(PriorityQueue* pq, int station, int dist) {
-	if (pq->bucket[station] != -1) // вынимаем из старой корзины
-		unlink_station(pq, station);
-
-	if (pq->size == 0) // очередь пуста
-		pq->cur = dist;
-
-	int b = dist % pq->nbuckets;
-	pq->prev[station] = -1;
-	pq->next[station] = pq->head[b];
-	if (pq->head[b] != -1)
-		pq->prev[pq->head[b]] = station;
-	pq->head[b] = station;
-	pq->bucket[station] = b;
+	pq->stations[pq->size] = station;
+	pq->dist[pq->size] = dist;
 	pq->size++;
+
+	for (int i = pq->size - 1; i > 0; i--) {
+		if (pq->dist[i] < pq->dist[i - 1]) {
+			int temp_station = pq->stations[i];
+			int temp_dist = pq->dist[i];
+			
+			pq->stations[i] = pq->stations[i - 1];
+			pq->dist[i] = pq->dist[i - 1];
+			pq->stations[i - 1] = temp_station;
+			pq->dist[i - 1] = temp_dist;
+		} 
+		else
+			break;
+	}
 }
 
 int pop_queue(PriorityQueue* pq) {
-	if (pq->size == 0)
-		return -1;
+	if (pq->size == 0) return -1;
 
-	// все дистанции в очереди лежат в [cur, cur + C], поэтому цикл конечен
-	while (pq->head[pq->cur % pq->nbuckets] == -1)
-		pq->cur++;
+	int result = pq->stations[0];
 
-	int v = pq->head[pq->cur % pq->nbuckets];
-	unlink_station(pq, v);
-	return v;
+	for (int i = 0; i < pq->size - 1; i++) {
+		pq->stations[i] = pq->stations[i + 1];
+		pq->dist[i] = pq->dist[i + 1];
+	}
+	pq->size--;
+
+	return result;
 }
 
 Path* fshortpath(int start, int end) {
